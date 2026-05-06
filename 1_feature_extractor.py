@@ -12,41 +12,59 @@ def get_spatial_moments(contour):
 
 def extract_9_circles(img_gray):
     # Phân ngưỡng ảnh
-    _, thresh = cv2.threshold(img_gray, 127, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
+    _, thresh = cv2.threshold(img_gray, 0, 255,
+                              cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    # Dùng RETR_EXTERNAL để tránh đếm trùng contour lồng nhau
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
     circles = []
     for c in contours:
         area = cv2.contourArea(c)
-        if area < 50:
+        if area < 200:          # loại nhiễu nhỏ
             continue
         perimeter = cv2.arcLength(c, True)
         if perimeter == 0:
             continue
         circularity = 4 * np.pi * (area / (perimeter * perimeter))
-        if 0.7 < circularity < 1.3:
-            pt = get_spatial_moments(c)
-            if pt is not None:
-                # Store contour, area, and center
-                circles.append({'center': pt, 'area': area, 'contour': c})
-    
-    # Giả sử 9 hình tròn là 9 contour tròn có diện tích lớn nhất
-    circles = sorted(circles, key=lambda x: x['area'], reverse=True)[:9]
-    
-    # Sắp xếp 9 điểm theo đặc điểm viền (ở đây giả sử diện tích/chu vi đại diện cho viền)
-    # P0: đặc biệt nhất, P1: nằm ngang hàng với P0, P2..P8 theo thứ tự
-    # Thực tế cần logic cụ thể hơn cho viền, ta giả sử P0 là hình có area lớn nhất.
-    # Để đơn giản, ta sắp xếp theo y trước (từ trên xuống), rồi x (từ trái qua)
-    circles.sort(key=lambda c: c['center'][1]) # sort by Y
+        # Circularity lý thuyết max = 1.0; cho thêm 5% sai số ảnh thực
+        if not (0.75 < circularity < 1.05):
+            continue
+        # Kiểm tra aspect ratio của bounding rect gần vuông (tròn)
+        x, y, bw, bh = cv2.boundingRect(c)
+        aspect = min(bw, bh) / max(bw, bh) if max(bw, bh) > 0 else 0
+        if aspect < 0.70:
+            continue
+        pt = get_spatial_moments(c)
+        if pt is not None:
+            circles.append({'center': pt, 'area': area, 'contour': c})
+
+    if len(circles) < 9:
+        return np.array([], dtype=np.float32)
+
+    # Lọc theo kích thước nhất quán: loại bỏ outlier area so với median
+    areas = np.array([c['area'] for c in circles], dtype=np.float32)
+    median_area = float(np.median(areas))
+    circles = [c for c in circles
+               if 0.25 * median_area < c['area'] < 4.0 * median_area]
+
+    if len(circles) < 9:
+        return np.array([], dtype=np.float32)
+
+    # Lấy 9 hình tròn có diện tích gần median nhất (ổn định hơn lấy top-9 lớn nhất)
+    circles = sorted(circles, key=lambda c: abs(c['area'] - median_area))[:9]
+
+    # Sắp xếp theo y trước (từ trên xuống), rồi x (từ trái qua)
+    circles.sort(key=lambda c: c['center'][1])
     rows = [circles[0:3], circles[3:6], circles[6:9]]
     for row in rows:
-        row.sort(key=lambda c: c['center'][0]) # sort by X
-    
+        row.sort(key=lambda c: c['center'][0])
+
     sorted_pts = []
     for row in rows:
         for c in row:
             sorted_pts.append(c['center'])
-            
+
     return np.array(sorted_pts, dtype=np.float32)
 
 def refine_corners_hessian(img_gray, predicted_corners, window_size=5):
@@ -95,7 +113,7 @@ def process_image(img_path, M_circles, M_squares, compute_homography_fn, out_dir
     
     # 1. Tìm 9 hình tròn
     circles_2d = extract_9_circles(gray)
-    if len(circles_2d) != 9:
+    if circles_2d is None or len(circles_2d) != 9:
         return None
         
     # 2. Tính Homography nháp từ 9 hình tròn
